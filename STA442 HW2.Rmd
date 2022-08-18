@@ -1,0 +1,393 @@
+---
+title: "STA442 HW2"
+author: "Ruichen Lu"
+date: "01/11/2021"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+### Homework2
+
+## Q1 
+```{r}
+cUrl = paste0("http://scrippsco2.ucsd.edu/assets/data/atmospheric/", 
+              "stations/flask_co2/daily/daily_flask_co2_mlo.csv")
+cFile = basename(cUrl)
+if (!file.exists(cFile)) download.file(cUrl, cFile) 
+co2s = read.table(cFile, header = FALSE, sep = ",", 
+                  skip = 69, stringsAsFactors = FALSE, 
+                  col.names = c("day",
+    "time", "junk1", "junk2", "Nflasks", "quality",
+    "co2"))
+co2s$date = as.Date(co2s$day)
+co2s$time = strptime(paste(co2s$day, co2s$time), format = "%Y-%m-%d %H:%M",
+tz = "UTC")
+# remove low-quality measurements 
+co2s = co2s[co2s$quality == 0, ]
+plot(co2s$date, co2s$co2, log = "y", cex = 0.3, 
+     col = "#00000040", xlab = "Year (All)", 
+     ylab = "CO2 Concentration (ppm)", 
+     main ="Monthly Average CO2 Concentration (a)")
+plot(co2s[co2s$date > as.Date("2015/3/1"), c("date", "co2")], 
+     log = "y", type = "o", xlab = "Year (Recent)", 
+     ylab = "CO2 Concentration (ppm)", 
+     cex = 0.5, main ="Monthly Average CO2 Concentration (b)")
+```
+
+```{r}
+co2s$dateWeek = as.Date(lubridate::floor_date(co2s$date,
+  unit = "week"))
+co2s$timeYears = as.numeric(co2s$date)/365.25
+co2s$cos12 = cos(2 * pi * co2s$timeYears)
+co2s$sin12 = sin(2 * pi * co2s$timeYears)
+co2s$cos6 = cos(2 * 2 * pi * co2s$timeYears)
+co2s$sin6 = sin(2 * 2 * pi * co2s$timeYears)
+allDays = seq(from = min(co2s$dateWeek), to = as.Date("2030/1/1"),
+  by = "7 days")
+table(co2s$dateWeek %in% allDays)
+```
+
+```{r, include=FALSE}
+co2s$dateWeekInt = as.integer(co2s$dateWeek)
+library("INLA", verbose = FALSE)
+mm = get("inla.models", INLA:::inla.get.inlaEnv())
+if (class(mm) == "function") mm = mm()
+mm$latent$rw2$min.diff = NULL
+assign("inla.models", mm, INLA:::inla.get.inlaEnv())
+co2res = inla(co2 ~ sin12 + cos12 + sin6 + cos6 + f(dateWeekInt,
+  model = "rw2", values = as.integer(allDays), prior = "pc.prec",
+  param = c(0.001, 0.5), scale.model = FALSE), data = co2s,
+  family = "gaussian", control.family = list(hyper = list(prec = list(prior = "pc.prec",
+    param = c(1, 0.5)))), control.inla = list(strategy = "gaussian"),
+  control.compute = list(config = TRUE), verbose = TRUE)
+```
+
+```{r}
+qCols = c("0.5quant", "0.025quant", "0.975quant")
+1/sqrt(co2res$summary.hyperpar[, qCols])
+```
+
+```{r, echo=FALSE}
+matplot(co2res$summary.random$dateWeekInt[, qCols],
+  type = "l", lty = 1)
+```
+
+```{r}
+sampleList = INLA::inla.posterior.sample(50, co2res)
+sampleMat = do.call(cbind, Biobase::subListExtract(sampleList,
+  "latent"))
+sampleMean = sampleMat[grep("dateWeekInt", rownames(sampleMat)),
+  ]
+sampleDeriv = apply(sampleMean, 2, diff) * (365.25/7)
+forSinCos = 2 * pi * as.numeric(allDays)/365.25
+forForecast = cbind(`(Intercept)` = 1, sin12 = sin(forSinCos),
+  cos12 = cos(forSinCos), sin6 = sin(2 * forSinCos),
+  cos6 = cos(2 * forSinCos))
+forecastFixed = forForecast %*% sampleMat[paste0(colnames(forForecast),
+  ":1"), ]
+forecast = forecastFixed + sampleMean
+```
+
+```{r}
+matplot(allDays, forecast, type = "l", col = "#00000010",
+  lty = 1, log = "y", xlab = "Time", ylab = "ppm", main="CO2 Concentration All the Time")
+forX = as.Date(c("2018/1/1", "2025/1/1"))
+forX = seq(forX[1], forX[2], by = "1 year")
+toPlot = which(allDays > min(forX) & allDays < max(forX))
+matplot(allDays, forecast, type = "l", col = "#00000020",
+  lty = 1, log = "y", xlab = "Time", ylab = "ppm", main="CO2 Concentration in Recent Year",
+  xaxs = "i", xaxt = "n", xlim = range(forX), ylim = range(forecast[which.min(abs(allDays -
+    max(forX))), ]))
+points(co2s$date, co2s$co2, col = "red", cex = 0.3)
+axis(1, as.numeric(forX), format(forX, "%Y"))
+```
+
+```{r}
+matplot(allDays, co2res$summary.random$dateWeekInt[,
+  qCols], type = "l", col = "black", lty = c(1, 2,
+  2), xlab = "Time", ylab = "Value", main= "The Change of Random Effect")
+matplot(allDays[-1], sampleDeriv, type = "l", lty = 1,
+  xaxs = "i", col = "#00000020", xlab = "Time", ylab = "Derivative",main="Derivative of CO2 Concentration All Time (a)",
+  ylim = quantile(sampleDeriv, c(0.025, 0.995)))
+#add time lines for two time
+abline(v = as.numeric(as.Date("1989-11-15")) , col = "blue") 
+abline(v = as.numeric(as.Date("2020-02-15")) , col = "blue")
+
+matplot(allDays[toPlot], sampleDeriv[toPlot, ], type = "l",
+  lty = 1, lwd = 2, xaxs = "i", col = "#00000020",
+  xlab = "Time", ylab = "Derivative",main="Derivative of CO2 Concentration in Recent Year (b)", 
+  xaxt = "n", ylim = quantile(sampleDeriv[toPlot,
+    ], c(0.01, 0.995)))
+axis(1, as.numeric(forX), format(forX, "%Y"))
+```
+
+
+
+## Question 2
+```{r}
+library(R.utils)
+x = read.csv("~/Desktop/deathdata.csv", header = TRUE)
+x[1:2, ]
+x$date = as.Date(as.character(x[[grep("DATE", names(x))]]))
+x$province = gsub("[,].*", "", x$GEO)
+
+x = x[x$date < as.Date("2020/12/01") & x$province == "Ontario", ]
+
+
+#for (D in c("heart", "neoplasms", "respiratory", "Accidents")) {
+#plot(x[grep(D, x$Cause), c("date", "VALUE")], ylab = D)
+   #abline(v = as.Date("2020/03/17"))}
+
+plot(x[grep("heart", x$Cause), c("date", "VALUE")],xlab="Date", ylab = "Heart", main="Mortality for Heart Disease (a)")
+abline(v = as.Date("2020/03/17"))
+plot(x[grep("neoplasms", x$Cause), c("date", "VALUE")], xlab="Date",ylab = "Neoplasms", main="Mortality for Neoplasms (b)")
+abline(v = as.Date("2020/03/17"))
+plot(x[grep("respiratory", x$Cause), c("date", "VALUE")], xlab="Date",ylab = "Respiratory", 
+     main="Mortality for Respiratory Disease (c)")
+abline(v = as.Date("2020/03/17"))
+plot(x[grep("Accidents", x$Cause), c("date", "VALUE")], xlab="Date",ylab = "Accidents", main="Mortality for Accidents (d)")
+abline(v = as.Date("2020/03/17"))
+```
+
+```{r}
+dateSeq = sort(unique(x$date))
+table(diff(dateSeq))
+dateSeqInt = as.integer(dateSeq)
+x$dateInt = x$dateIid = as.integer(x$date)
+x$cos12 = cos(2 * pi * x$dateInt/365.25)
+x$sin12 = sin(2 * pi * x$dateInt/365.25)
+x$sin6 = sin(2 * 2 * pi * x$dateInt/365.25)
+x$cos6 = cos(2 * 2 * pi * x$dateInt/365.25)
+x$dayOfYear = as.Date(gsub("^[[:digit:]]+", "0000",
+  x$date))
+x$christmasBreak = (x$dayOfYear >= as.Date("0000/12/21")) |
+  (x$dayOfYear <= as.Date("0000/01/12"))
+xSub = x[grepl("heart", x$Cause, ignore.case = TRUE) &
+  x$province == "Ontario", ]
+xPreCovid = xSub[xSub$date < as.Date("2020/02/01") &
+  (!xSub$christmasBreak), ]
+#library('INLA', verbose=FALSE)
+resHere = inla(VALUE ~ cos12 + cos6 + sin12 + sin6 +
+  f(dateInt, model = "rw2", values = dateSeqInt,
+    prior = "pc.prec", param = c(0.001, 0.5)) +
+  f(dateIid, values = dateSeqInt, prior = "pc.prec",
+    param = c(log(1.25), 0.5)), data = xPreCovid,
+  family = "poisson", control.compute = list(config = TRUE),
+  control.predictor = list(compute = TRUE))
+matplot(resHere$.args$data$date, resHere$summary.fitted[,
+  paste0(c(0.025, 0.975, 0.5), "quant")], type = "l",
+  lty = c(2, 2, 1), col = "black", log = "y",xlab="Time",ylab="Death Counts",main="Fitted Value of Death Counts Over time (a)", ylim = range(xSub$VALUE))
+points(xSub$date, xSub$VALUE, col = "red")
+points(xPreCovid$date, xPreCovid$VALUE, col = "blue")
+matplot(dateSeq, resHere$summary.random$dateInt[, paste0(c(0.025,
+  0.975, 0.5), "quant")], type = "l", lty = c(2,
+  2, 1), xlab ="Time", ylab="Value",main="Change of Random Effect (d)", col = "black")
+toPredict = cbind(`(Intercept):1` = 1, `cos12:1` = cos(2 *
+  pi * dateSeqInt/365.25), `sin12:1` = sin(2 * pi *
+  dateSeqInt/365.25), `cos6:1` = cos(2 * pi * dateSeqInt *
+  2/365.25), `sin6:1` = sin(2 * pi * dateSeqInt *
+  2/365.25))
+dateIntSeq = paste0("dateInt:", 1:length(dateSeqInt)) 
+dateIidSeq = paste0("dateIid:", 1:length(dateSeqInt)) 
+resSample = inla.posterior.sample(n = 100, resHere) 
+resSampleFitted = lapply(resSample, function(xx) {
+  toPredict %*% xx$latent[colnames(toPredict), ] +
+    xx$latent[dateIntSeq, ] + xx$latent[dateIidSeq,
+    ]
+})
+resSampleFitted = do.call(cbind, resSampleFitted)
+resSampleLambda = exp(resSampleFitted)
+resSampleCount = matrix(rpois(length(resSampleLambda),
+  resSampleLambda), nrow(resSampleLambda), ncol(resSampleLambda))
+matplot(dateSeq, resSampleCount, col = "#00000010",
+  type = "l", lty = 1, log = "y",xlab="Time", ylab="Death Count", main= "Fitted Value of Death Counts in Details (b)")
+points(xSub[, c("date", "VALUE")], col = "red")
+abline(v = as.Date("2020/03/01"), col = "yellow")
+is2020 = dateSeq[dateSeq >= as.Date("2020/2/1")]
+sample2020 = resSampleCount[match(is2020, dateSeq),
+  ]
+count2020 = xSub[match(is2020, xSub$date), "VALUE"]
+excess2020 = count2020 - sample2020
+matplot(is2020, excess2020, type = "l", lty = 1,xlab="Time", ylab="Excessive Death", main="Excessive Death in 2020 (c)",  
+        col = "#0000FF10",
+        ylim = range(-10, quantile(excess2020, c(0.1, 0.999))))
+matlines(is2020, t(apply(excess2020, 1, quantile, prob = c(0.1, 0.9))), 
+         col = "black", lty = 2)
+abline(h = 0)
+quantile(apply(excess2020, 1, sum))
+```
+```{r}
+xSub = x[grepl("neoplasms", x$Cause, ignore.case = TRUE) &
+  x$province == "Ontario", ]
+xPreCovid = xSub[xSub$date < as.Date("2020/02/01") &
+  (!xSub$christmasBreak), ]
+#library('INLA', verbose=FALSE)
+resHere = inla(VALUE ~ cos12 + cos6 + sin12 + sin6 +
+  f(dateInt, model = "rw2", values = dateSeqInt,
+    prior = "pc.prec", param = c(0.001, 0.5)) +
+  f(dateIid, values = dateSeqInt, prior = "pc.prec",
+    param = c(log(1.25), 0.5)), data = xPreCovid,
+  family = "poisson", control.compute = list(config = TRUE),
+  control.predictor = list(compute = TRUE))
+matplot(resHere$.args$data$date, resHere$summary.fitted[,
+  paste0(c(0.025, 0.975, 0.5), "quant")], type = "l",
+  lty = c(2, 2, 1), col = "black", log = "y",xlab="Time",ylab="Death Counts",main="Fitted Value of Death Counts Over time (a)", ylim = range(xSub$VALUE))
+points(xSub$date, xSub$VALUE, col = "red")
+points(xPreCovid$date, xPreCovid$VALUE, col = "blue")
+matplot(dateSeq, resHere$summary.random$dateInt[, paste0(c(0.025,
+  0.975, 0.5), "quant")], type = "l", lty = c(2,
+  2, 1), xlab ="Time", ylab="Value",main="Change of Random Effect (d)", col = "black")
+toPredict = cbind(`(Intercept):1` = 1, `cos12:1` = cos(2 *
+  pi * dateSeqInt/365.25), `sin12:1` = sin(2 * pi *
+  dateSeqInt/365.25), `cos6:1` = cos(2 * pi * dateSeqInt *
+  2/365.25), `sin6:1` = sin(2 * pi * dateSeqInt *
+  2/365.25))
+dateIntSeq = paste0("dateInt:", 1:length(dateSeqInt)) 
+dateIidSeq = paste0("dateIid:", 1:length(dateSeqInt)) 
+resSample = inla.posterior.sample(n = 100, resHere) 
+resSampleFitted = lapply(resSample, function(xx) {
+  toPredict %*% xx$latent[colnames(toPredict), ] +
+    xx$latent[dateIntSeq, ] + xx$latent[dateIidSeq,
+    ]
+})
+resSampleFitted = do.call(cbind, resSampleFitted)
+resSampleLambda = exp(resSampleFitted)
+resSampleCount = matrix(rpois(length(resSampleLambda),
+  resSampleLambda), nrow(resSampleLambda), ncol(resSampleLambda))
+matplot(dateSeq, resSampleCount, col = "#00000010",
+  type = "l", lty = 1, log = "y",xlab="Time", ylab="Death Count", main= "Fitted Value of Death Counts in Details (b)")
+points(xSub[, c("date", "VALUE")], col = "red")
+abline(v = as.Date("2020/03/01"), col = "yellow")
+is2020 = dateSeq[dateSeq >= as.Date("2020/2/1")]
+sample2020 = resSampleCount[match(is2020, dateSeq),
+  ]
+count2020 = xSub[match(is2020, xSub$date), "VALUE"]
+excess2020 = count2020 - sample2020
+matplot(is2020, excess2020, type = "l", lty = 1,xlab="Time", ylab="Excessive Death", main="Excessive Death in 2020 (c)",  
+        col = "#0000FF10",
+        ylim = range(-10, quantile(excess2020, c(0.1, 0.999))))
+matlines(is2020, t(apply(excess2020, 1, quantile, prob = c(0.1, 0.9))), 
+         col = "black", lty = 2)
+abline(h = 0)
+quantile(apply(excess2020, 1, sum))
+```
+
+```{r}
+xSub = x[grepl("respiratory", x$Cause, ignore.case = TRUE) &
+  x$province == "Ontario", ]
+xPreCovid = xSub[xSub$date < as.Date("2020/02/01") &
+  (!xSub$christmasBreak), ]
+#library('INLA', verbose=FALSE)
+resHere = inla(VALUE ~ cos12 + cos6 + sin12 + sin6 +
+  f(dateInt, model = "rw2", values = dateSeqInt,
+    prior = "pc.prec", param = c(0.001, 0.5)) +
+  f(dateIid, values = dateSeqInt, prior = "pc.prec",
+    param = c(log(1.25), 0.5)), data = xPreCovid,
+  family = "poisson", control.compute = list(config = TRUE),
+  control.predictor = list(compute = TRUE))
+matplot(resHere$.args$data$date, resHere$summary.fitted[,
+  paste0(c(0.025, 0.975, 0.5), "quant")], type = "l",
+  lty = c(2, 2, 1), col = "black", log = "y",xlab="Time",ylab="Death Counts",main="Fitted Value of Death Counts Over time (a)", ylim = range(xSub$VALUE))
+points(xSub$date, xSub$VALUE, col = "red")
+points(xPreCovid$date, xPreCovid$VALUE, col = "blue")
+matplot(dateSeq, resHere$summary.random$dateInt[, paste0(c(0.025,
+  0.975, 0.5), "quant")], type = "l", lty = c(2,
+  2, 1), xlab ="Time", ylab="Value",main="Change of Random Effect (d)", col = "black")
+toPredict = cbind(`(Intercept):1` = 1, `cos12:1` = cos(2 *
+  pi * dateSeqInt/365.25), `sin12:1` = sin(2 * pi *
+  dateSeqInt/365.25), `cos6:1` = cos(2 * pi * dateSeqInt *
+  2/365.25), `sin6:1` = sin(2 * pi * dateSeqInt *
+  2/365.25))
+dateIntSeq = paste0("dateInt:", 1:length(dateSeqInt)) 
+dateIidSeq = paste0("dateIid:", 1:length(dateSeqInt)) 
+resSample = inla.posterior.sample(n = 100, resHere) 
+resSampleFitted = lapply(resSample, function(xx) {
+  toPredict %*% xx$latent[colnames(toPredict), ] +
+    xx$latent[dateIntSeq, ] + xx$latent[dateIidSeq,
+    ]
+})
+resSampleFitted = do.call(cbind, resSampleFitted)
+resSampleLambda = exp(resSampleFitted)
+resSampleCount = matrix(rpois(length(resSampleLambda),
+  resSampleLambda), nrow(resSampleLambda), ncol(resSampleLambda))
+matplot(dateSeq, resSampleCount, col = "#00000010",
+  type = "l", lty = 1, log = "y",xlab="Time", ylab="Death Count", main= "Fitted Value of Death Counts in Details (b)")
+points(xSub[, c("date", "VALUE")], col = "red")
+abline(v = as.Date("2020/03/01"), col = "yellow")
+is2020 = dateSeq[dateSeq >= as.Date("2020/2/1")]
+sample2020 = resSampleCount[match(is2020, dateSeq),
+  ]
+count2020 = xSub[match(is2020, xSub$date), "VALUE"]
+excess2020 = count2020 - sample2020
+matplot(is2020, excess2020, type = "l", lty = 1,xlab="Time", ylab="Excessive Death", main="Excessive Death in 2020 (c)",  
+        col = "#0000FF10",
+        ylim = range(-10, quantile(excess2020, c(0.1, 0.999))))
+matlines(is2020, t(apply(excess2020, 1, quantile, prob = c(0.1, 0.9))), 
+         col = "black", lty = 2)
+abline(h = 0)
+quantile(apply(excess2020, 1, sum))
+```
+
+
+```{r}
+xSub = x[grepl("Accidents", x$Cause, ignore.case = TRUE) &
+  x$province == "Ontario", ]
+xPreCovid = xSub[xSub$date < as.Date("2020/02/01") &
+  (!xSub$christmasBreak), ]
+#library('INLA', verbose=FALSE)
+resHere = inla(VALUE ~ cos12 + cos6 + sin12 + sin6 +
+  f(dateInt, model = "rw2", values = dateSeqInt,
+    prior = "pc.prec", param = c(0.001, 0.5)) +
+  f(dateIid, values = dateSeqInt, prior = "pc.prec",
+    param = c(log(1.25), 0.5)), data = xPreCovid,
+  family = "poisson", control.compute = list(config = TRUE),
+  control.predictor = list(compute = TRUE))
+matplot(resHere$.args$data$date, resHere$summary.fitted[,
+  paste0(c(0.025, 0.975, 0.5), "quant")], type = "l",
+  lty = c(2, 2, 1), col = "black", log = "y",xlab="Time",ylab="Death Counts",main="Fitted Value of Death Counts Over time (a)", ylim = range(xSub$VALUE))
+points(xSub$date, xSub$VALUE, col = "red")
+points(xPreCovid$date, xPreCovid$VALUE, col = "blue")
+matplot(dateSeq, resHere$summary.random$dateInt[, paste0(c(0.025,
+  0.975, 0.5), "quant")], type = "l", lty = c(2,
+  2, 1), xlab ="Time", ylab="Value",main="Change of Random Effect (d)", col = "black")
+toPredict = cbind(`(Intercept):1` = 1, `cos12:1` = cos(2 *
+  pi * dateSeqInt/365.25), `sin12:1` = sin(2 * pi *
+  dateSeqInt/365.25), `cos6:1` = cos(2 * pi * dateSeqInt *
+  2/365.25), `sin6:1` = sin(2 * pi * dateSeqInt *
+  2/365.25))
+dateIntSeq = paste0("dateInt:", 1:length(dateSeqInt)) 
+dateIidSeq = paste0("dateIid:", 1:length(dateSeqInt)) 
+resSample = inla.posterior.sample(n = 100, resHere) 
+resSampleFitted = lapply(resSample, function(xx) {
+  toPredict %*% xx$latent[colnames(toPredict), ] +
+    xx$latent[dateIntSeq, ] + xx$latent[dateIidSeq,
+    ]
+})
+resSampleFitted = do.call(cbind, resSampleFitted)
+resSampleLambda = exp(resSampleFitted)
+resSampleCount = matrix(rpois(length(resSampleLambda),
+  resSampleLambda), nrow(resSampleLambda), ncol(resSampleLambda))
+matplot(dateSeq, resSampleCount, col = "#00000010",
+  type = "l", lty = 1, log = "y",xlab="Time", ylab="Death Count", main= "Fitted Value of Death Counts in Details (b)")
+points(xSub[, c("date", "VALUE")], col = "red")
+abline(v = as.Date("2020/03/01"), col = "yellow")
+is2020 = dateSeq[dateSeq >= as.Date("2020/2/1")]
+sample2020 = resSampleCount[match(is2020, dateSeq),
+  ]
+count2020 = xSub[match(is2020, xSub$date), "VALUE"]
+excess2020 = count2020 - sample2020
+matplot(is2020, excess2020, type = "l", lty = 1,xlab="Time", ylab="Excessive Death", main="Excessive Death in 2020 (c)",  
+        col = "#0000FF10",
+        ylim = range(-10, quantile(excess2020, c(0.1, 0.999))))
+matlines(is2020, t(apply(excess2020, 1, quantile, prob = c(0.1, 0.9))), 
+         col = "black", lty = 2)
+abline(h = 0)
+quantile(apply(excess2020, 1, sum))
+```
+
